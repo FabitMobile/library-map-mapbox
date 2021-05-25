@@ -1,0 +1,2 @@
+include ':library-map-mapbox'
+rootProject.name = "map-mapbox"
