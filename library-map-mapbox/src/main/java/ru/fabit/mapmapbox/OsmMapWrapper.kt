@@ -65,6 +65,8 @@ class OsmMapWrapper(
         private var payableZones: List<String> = listOf()
     }
 
+    private var bottomRightY: Float = 0.0f
+    private var bottomRightX: Float = 0.0f
     private val colors = mutableMapOf<Int, String>()
     private val geojsonLayerId: String = "geojsonLayerId"
     private val geojsonSourceId: String = "geojsonSourceId"
@@ -353,7 +355,7 @@ class OsmMapWrapper(
         val deltaLon = (maxLon - minLon) / 4
 
         return bounds.latLngBounds?.center?.longitude!! !in (minLon + deltaLon)..(maxLon - deltaLon)
-                || bounds.latLngBounds?.center?.latitude!! !in (minLat + deltaLat)..(maxLat - deltaLat)
+            || bounds.latLngBounds?.center?.latitude!! !in (minLat + deltaLat)..(maxLat - deltaLat)
     }
 
     private fun addGeojson(bounds: LatLngBoundsZoom, selectedMarker: Marker?) {
@@ -557,24 +559,35 @@ class OsmMapWrapper(
         bottomRightX: Float,
         bottomRightY: Float
     ) {
+        this.bottomRightX = bottomRightX
+        this.bottomRightY = bottomRightY
+        calculateOffsetFromCenter()
+
+        latLngSelectedObject?.let { latLngSelectedObject ->
+            moveCameraPositionWithZoom(latLngSelectedObject.latitude, latLngSelectedObject.longitude, zoom ?: DEFAULT_ZOOM.toFloat())
+        }
+    }
+
+    private fun calculateOffsetFromCenter() {
         mapView?.let { mapView ->
-            val centerOfVisibleMapView = PointF(
-                bottomRightX / 2,
-                bottomRightY / 2
-            )
             val centerMapView = PointF(
                 mapView.width.toFloat() / 2,
                 mapView.height.toFloat() / 2
             )
+
+            val centerOfVisibleMapView = if (bottomRightY > 0) {
+                PointF(
+                    bottomRightX / 2,
+                    bottomRightY / 2
+                )
+            } else centerMapView
+
             mapboxMap?.let { mapboxMap ->
                 val latLngOfCenterOfVisibleMapView =
                     mapboxMap.projection.fromScreenLocation(centerOfVisibleMapView)
                 val latLngOfCenterMapView = mapboxMap.projection.fromScreenLocation(centerMapView)
                 offsetFromCenter =
                     latLngOfCenterOfVisibleMapView.latitude - latLngOfCenterMapView.latitude
-            }
-            latLngSelectedObject?.let { latLngSelectedObject ->
-                moveCameraPositionWithZoom(latLngSelectedObject.latitude, latLngSelectedObject.longitude, zoom ?: DEFAULT_ZOOM.toFloat())
             }
         }
     }
@@ -749,9 +762,9 @@ class OsmMapWrapper(
                 } else {
                     val bitmapId = addBitmap(style, marker)
                     if (marker.type != MarkerType.NO_MARKER) {
-                        if (!(markersMap.contains(marker.id) && mapboxMap?.cameraPosition?.zoom == zoomGeojson.toDouble()
-                                    && marker.data?.type == MapItemType.PARKING.toString()
-                                    )
+                        if (!(markersMap.contains(marker.id)
+                                && mapboxMap?.cameraPosition?.zoom == zoomGeojson.toDouble()
+                                && marker.data?.type == MapItemType.PARKING.toString())
                         ) {
                             markerFeatures.add(createSymbolFeature(marker, bitmapId))
                         }
@@ -909,6 +922,7 @@ class OsmMapWrapper(
     }
 
     override fun moveCameraPositionWithZoom(latitude: Double, longitude: Double, zoom: Float) {
+        calculateOffsetFromCenter()
         val latLng = LatLng(latitude - offsetFromCenter, longitude)
         latLngSelectedObject = LatLng(latitude, longitude)
         this.latitude = latitude
@@ -1052,6 +1066,7 @@ class OsmMapWrapper(
         geojsonString = ""
         mapboxMap?.let { updateGeojsonLayer(it, null) }
         updateMapObject(markersMap.values.toMutableList())
+        latLngSelectedObject = null
     }
 
     override fun selectMarker(markerToSelect: Marker) {
@@ -1062,11 +1077,14 @@ class OsmMapWrapper(
 
     override fun zoomIn() {
         val cameraPosition = mapboxMap?.cameraPosition
-        cameraPosition?.let {
-            val latLng = cameraPosition.target
-            var zoom = cameraPosition.zoom
-            val bearing = cameraPosition.bearing
-            val tilt = cameraPosition.tilt
+        cameraPosition?.let { position ->
+            calculateOffsetFromCenter()
+
+            val latLng =
+                LatLng(position.target.latitude + offsetFromCenter / 2, position.target.longitude)
+            var zoom = position.zoom
+            val bearing = position.bearing
+            val tilt = position.tilt
             if (zoom < MAX_ZOOM) {
                 zoom += 1
             }
@@ -1086,11 +1104,14 @@ class OsmMapWrapper(
 
     override fun zoomOut() {
         val cameraPosition = mapboxMap?.cameraPosition
-        cameraPosition?.let {
-            val latLng = cameraPosition.target
-            var zoom = cameraPosition.zoom
-            val bearing = cameraPosition.bearing
-            val tilt = cameraPosition.tilt
+        cameraPosition?.let { position ->
+            calculateOffsetFromCenter()
+
+            val latLng =
+                LatLng(position.target.latitude - offsetFromCenter, position.target.longitude)
+            var zoom = position.zoom
+            val bearing = position.bearing
+            val tilt = position.tilt
             if (zoom > MIN_ZOOM) {
                 zoom -= 1
             }
