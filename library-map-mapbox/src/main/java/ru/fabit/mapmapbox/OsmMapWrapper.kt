@@ -1,39 +1,37 @@
 package ru.fabit.mapmapbox
 
-import android.Manifest.permission.ACCESS_COARSE_LOCATION
-import android.Manifest.permission.ACCESS_FINE_LOCATION
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.PointF
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper.getMainLooper
 import android.view.View
 import com.mapbox.android.core.location.*
 import com.mapbox.geojson.*
-import com.mapbox.mapboxsdk.Mapbox
-import com.mapbox.mapboxsdk.camera.CameraPosition
-import com.mapbox.mapboxsdk.camera.CameraUpdateFactory
-import com.mapbox.mapboxsdk.geometry.LatLng
-import com.mapbox.mapboxsdk.geometry.LatLngBounds
-import com.mapbox.mapboxsdk.geometry.LatLngBoundsZoom
-import com.mapbox.mapboxsdk.location.LocationComponent
-import com.mapbox.mapboxsdk.location.LocationComponentActivationOptions
-import com.mapbox.mapboxsdk.location.LocationUpdate
-import com.mapbox.mapboxsdk.location.modes.CameraMode
-import com.mapbox.mapboxsdk.location.modes.RenderMode
-import com.mapbox.mapboxsdk.maps.MapView
-import com.mapbox.mapboxsdk.maps.MapboxMap
-import com.mapbox.mapboxsdk.maps.MapboxMapOptions
-import com.mapbox.mapboxsdk.maps.Style
-import com.mapbox.mapboxsdk.plugins.localization.LocalizationPlugin
-import com.mapbox.mapboxsdk.plugins.markerview.MarkerViewManager
-import com.mapbox.mapboxsdk.style.expressions.Expression
-import com.mapbox.mapboxsdk.style.layers.*
-import com.mapbox.mapboxsdk.style.sources.GeoJsonOptions
-import com.mapbox.mapboxsdk.style.sources.GeoJsonSource
-import com.mapbox.mapboxsdk.utils.ColorUtils
+import com.mapbox.maps.*
+import com.mapbox.maps.extension.localization.localizeLabels
+import com.mapbox.maps.extension.style.expressions.dsl.generated.match
+import com.mapbox.maps.extension.style.expressions.generated.Expression
+import com.mapbox.maps.extension.style.layers.addLayer
+import com.mapbox.maps.extension.style.layers.generated.*
+import com.mapbox.maps.extension.style.layers.getLayer
+import com.mapbox.maps.extension.style.layers.properties.generated.LineCap
+import com.mapbox.maps.extension.style.layers.properties.generated.LineJoin
+import com.mapbox.maps.extension.style.sources.addSource
+import com.mapbox.maps.extension.style.sources.generated.GeoJsonSource
+import com.mapbox.maps.extension.style.sources.generated.geoJsonSource
+import com.mapbox.maps.extension.style.sources.getSource
+import com.mapbox.maps.extension.style.style
+import com.mapbox.maps.extension.style.utils.ColorUtils
+import com.mapbox.maps.plugin.animation.CameraAnimatorChangeListener
+import com.mapbox.maps.plugin.animation.MapAnimationOptions
+import com.mapbox.maps.plugin.animation.camera
+import com.mapbox.maps.plugin.animation.flyTo
+import com.mapbox.maps.plugin.gestures.OnMapClickListener
+import com.mapbox.maps.plugin.gestures.addOnMapClickListener
+import com.mapbox.maps.plugin.gestures.gestures
+import com.mapbox.maps.plugin.locationcomponent.location
 import ru.fabit.map.dependencies.factory.GeoJsonFactory
 import ru.fabit.map.dependencies.factory.GeometryColorFactory
 import ru.fabit.map.dependencies.factory.MarkerBitmapFactory
@@ -41,12 +39,13 @@ import ru.fabit.map.internal.domain.entity.*
 import ru.fabit.map.internal.domain.entity.marker.*
 import ru.fabit.map.internal.domain.listener.*
 import ru.fabit.map.internal.protocol.MapProtocol
+import java.util.*
 import kotlin.math.abs
-
+import kotlin.math.roundToInt
 
 class OsmMapWrapper(
     private val context: Context,
-    key: String,
+    private val key: String,
     private val geoJsonFactory: GeoJsonFactory,
     private val markerBitmapFactory: MarkerBitmapFactory,
     private val geometryColorFactory: GeometryColorFactory,
@@ -54,7 +53,8 @@ class OsmMapWrapper(
     private val zoomGeojson: Int,
     private val drawablesForAnimated: List<Bitmap>,
     private val mapStyleProvider: OsmMapStyleProviderImpl,
-    private val lineColorProvider: LineColorProvider
+    private val lineColorProvider: LineColorProvider,
+    private val permissionProvider: PermissionProvider
 ) : MapProtocol {
 
     companion object {
@@ -65,19 +65,20 @@ class OsmMapWrapper(
         private var payableZones: List<String> = listOf()
     }
 
+    private var bottomRightY: Float = 0.0f
     private val colors = mutableMapOf<Int, String>()
     private val geojsonLayerId: String = "geojsonLayerId"
     private val geojsonSourceId: String = "geojsonSourceId"
-    private var currentMapBounds: LatLngBoundsZoom? = null
+    private var geojsonMapBoundsZoom: CoordinateBoundsZoom? = null
     private var geojsonString: String = ""
     private var initStyle: String = Style.MAPBOX_STREETS
     private var isColoredMarkersEnabled: Boolean = false
     private val MIN_ZOOM: Double = 0.0
     private val MAX_ZOOM: Double = 20.0
     private val DEFAULT_ZOOM: Double = 18.00
-    private val COARSE_LOCATION_PERMISSION = ACCESS_COARSE_LOCATION
-    private val FINE_LOCATION_PERMISSION = ACCESS_FINE_LOCATION
+    private val DURATION_200MS: Long = 200L
     private val DEFAULT_DISPLACEMENT = 10f
+    private val uiThreadHandler: Handler
 
     private var isDisabledOn: Boolean = false
     private var isRadarOn: Boolean = false
@@ -100,11 +101,10 @@ class OsmMapWrapper(
     private val STROKE_COLOR_PROPERTY = "STROKE_COLOR_PROPERTY"
 
     private var visibleMapRegionListeners = mutableListOf<VisibleMapRegionListener>()
-    private var markerManager: MarkerViewManager? = null
+
     private var mapView: MapView? = null
     private var isDebug: Boolean = false
-    private var mapboxMap: MapboxMap? = null
-    private var locationComponent: LocationComponent? = null
+
     private var mapListeners = mutableListOf<MapListener>()
     private var style: Style? = null
     private val coefficientScaleMapBounds = 1.2f
@@ -136,8 +136,7 @@ class OsmMapWrapper(
     private var zoom: Float? = null
     private val bitmaps = mutableMapOf<String, Bitmap>()
     private val parkingImageProvider: ParkingImageProvider?
-    private var latLngSelectedObject: LatLng? = null
-    private var offsetFromCenter: Double = 0.0
+    private var lastLocation: android.location.Location? = null
 
     private var locationEngineCallback: LocationEngineCallback<LocationEngineResult>? =
         object : LocationEngineCallback<LocationEngineResult> {
@@ -149,16 +148,13 @@ class OsmMapWrapper(
                             MapCoordinates(
                                 location.latitude,
                                 location.longitude,
-                                location.speed.toDouble() ?: 0.0,
+                                location.speed.toDouble(),
                                 location.provider ?: "",
-                                location.accuracy ?: 0f
+                                location.accuracy
                             )
                         )
                     }
-                    val locationUpdate = LocationUpdate.Builder().location(location).build()
-                    if (mapboxMap != null) {
-                        locationComponent?.forceLocationUpdate(locationUpdate)
-                    }
+                    lastLocation = location
                 }
             }
 
@@ -168,8 +164,9 @@ class OsmMapWrapper(
         }
 
     init {
-        Mapbox.getInstance(context, key)
         parkingImageProvider = ParkingImageProvider(markerBitmapFactory)
+        val mainLooper = getMainLooper()
+        this.uiThreadHandler = Handler(mainLooper)
     }
 
     override fun isDebugMode(): Boolean {
@@ -197,9 +194,13 @@ class OsmMapWrapper(
     }
 
     override fun enableMap() {
-        val options = MapboxMapOptions.createFromAttributes(context)
-        options.renderSurfaceOnTop(true)
-        mapView = MapView(context, options)
+        val resourceOptions = ResourceOptionsManager.getDefault(context, key).resourceOptions
+        val options = MapInitOptions(
+            context = context,
+            textureView = true,
+            resourceOptions = resourceOptions
+        )
+        mapView = MapView(context = context, mapInitOptions = options)
         mapView?.addOnLayoutChangeListener(layoutChangeListener)
     }
 
@@ -214,182 +215,167 @@ class OsmMapWrapper(
         style: String,
         onInitializedListener: (mapboxMap: MapboxMap) -> Unit = {}
     ) {
-        mapView?.getMapAsync { mapboxMap ->
-            mapboxMap.setStyle(
-                Style.Builder().fromUri(style)
-                    .withSource(GeoJsonSource(markerSourceId))
-                    .withSource(GeoJsonSource(polygonSourceId))
-                    .withSource(GeoJsonSource(lineSourceId))
-                    .withSource(
-                        GeoJsonSource(
-                            geojsonSourceId,
-                            GeoJsonOptions().withMinZoom(zoomGeojson)
-                        )
-                    )
-                    .withLayer(buildLineLayer())
-                    .withLayerBelow(LineLayer(geojsonLayerId, geojsonSourceId), lineLayerId)
-                    .withLayerAbove(buildMarkerLayer(), lineLayerId)
-                    .withLayerBelow(
-                        buildPolygonOutLineLayer(),
-                        markerLayerId
-                    )
-                    .withLayerBelow(
-                        buildPolygonLayer(),
-                        polygonOutlineLayerId
-                    )
-            ) { style ->
-                this.style = style
-
+        mapView?.getMapboxMap()?.loadStyle(styleExtension = style(style) {
+            +geoJsonSource(markerSourceId)
+            +geoJsonSource(polygonSourceId)
+            +geoJsonSource(lineSourceId)
+            +geoJsonSource(geojsonSourceId)
+            +buildLineLayer()
+            +layerAtPosition(
+                layer = lineLayer(
+                    geojsonLayerId,
+                    geojsonSourceId
+                ) { minZoom(zoomGeojson.toDouble()) },
+                below = lineLayerId
+            )
+            +layerAtPosition(
+                layer = buildMarkerLayer(),
+                above = lineLayerId
+            )
+            +layerAtPosition(
+                layer = buildPolygonOutLineLayer(),
+                below = markerLayerId
+            )
+            +layerAtPosition(
+                layer = buildPolygonLayer(),
+                below = polygonOutlineLayerId
+            )
+        }) { loadedStyle ->
+            this.style = loadedStyle
+            mapView?.getMapboxMap()?.apply {
                 drawablesForAnimated.forEachIndexed { index, item ->
-                    style.addImage(index.toString(), item)
+                    loadedStyle.addImage(index.toString(), item)
                 }
-
-                enableLocationComponent(style, mapboxMap)
-
-                mapboxMap.setMaxZoomPreference(MAX_ZOOM)
-
-                val localizationPlugin = LocalizationPlugin(mapView!!, mapboxMap, style)
-                localizationPlugin.matchMapLanguageWithDeviceDefault()
-
-                mapboxMap.uiSettings.isRotateGesturesEnabled = false
-                mapboxMap.uiSettings.isTiltGesturesEnabled = false
-
+                enableLocationComponent()
+                mapView?.gestures?.rotateEnabled = false
+                mapView?.gestures?.pitchEnabled = false
+                loadedStyle.localizeLabels(Locale.getDefault())
+                setBounds(
+                    CameraBoundsOptions.Builder()
+                        .maxZoom(MAX_ZOOM)
+                        .build()
+                )
                 var selectedMarker: Marker? = null
                 markersMap.forEach {
                     if (it.value.state == MarkerState.SELECTED) {
                         selectedMarker = it.value
                     }
                 }
-                updateGeojsonLayer(mapboxMap, selectedMarker)
+                val boundsZoom = getCoordinateBoundsZoomWithoutContentPaddings(this)
+                updateGeojsonLayer(boundsZoom, selectedMarker)
+                mapView?.camera?.addCameraCenterChangeListener(OsmOnCameraMoveListener(this))
+                mapView?.camera?.addCameraZoomChangeListener(OsmOnCameraScaleListener(this))
+                addOnMapClickListener(OsmOnMapClickListener(this))
+                onInitializedListener(this)
             }
-            mapboxMap.addOnCameraMoveListener(OsmOnCameraMoveListener(mapboxMap))
-
-            markerManager = MarkerViewManager(mapView, mapboxMap)
-            markerManager?.onCameraDidChange(false)
-
-            mapClickListener(mapboxMap)
-
-            this.mapboxMap = mapboxMap
-
-            onInitializedListener(mapboxMap)
         }
     }
 
     private fun buildPolygonLayer(): FillLayer {
         val polygonLayer = FillLayer(polygonLayerId, polygonSourceId)
-        polygonLayer.setProperties(
-            PropertyFactory.fillColor(
-                Expression.get(COLOR_PROPERTY)
-            ),
-            PropertyFactory.fillOpacity(0.6f)
+        polygonLayer.fillColor(
+            Expression.get(COLOR_PROPERTY)
         )
+        polygonLayer.fillOpacity(0.6)
         return polygonLayer
     }
 
     private fun buildPolygonOutLineLayer(): LineLayer {
         val polygonOutlineLayer = LineLayer(polygonOutlineLayerId, polygonSourceId)
-        polygonOutlineLayer.setProperties(
-            PropertyFactory.lineColor(
-                Expression.get(STROKE_COLOR_PROPERTY)
-            ),
-            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-            PropertyFactory.lineJoin(Property.LINE_JOIN_MITER),
-            PropertyFactory.lineWidth(4.5f)
+        polygonOutlineLayer.lineColor(
+            Expression.get(STROKE_COLOR_PROPERTY)
         )
+        polygonOutlineLayer.lineCap(LineCap.ROUND)
+        polygonOutlineLayer.lineJoin(LineJoin.MITER)
+        polygonOutlineLayer.lineWidth(4.5)
         return polygonOutlineLayer
     }
 
     private fun buildLineLayer(): LineLayer {
         val lineLayer = LineLayer(lineLayerId, lineSourceId)
-        lineLayer.setProperties(
-            PropertyFactory.lineColor(
-                Expression.get(COLOR_PROPERTY)
-            ),
-            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-            PropertyFactory.lineJoin(Property.LINE_JOIN_MITER),
-            PropertyFactory.lineWidth(4.5f)
+        lineLayer.lineColor(
+            Expression.get(COLOR_PROPERTY)
         )
+        lineLayer.lineCap(LineCap.ROUND)
+        lineLayer.lineJoin(LineJoin.MITER)
+        lineLayer.lineWidth(4.5)
         return lineLayer
     }
 
     private fun buildMarkerLayer(): SymbolLayer {
         val markerLayer = SymbolLayer(markerLayerId, markerSourceId)
-        markerLayer.setProperties(
-            PropertyFactory.iconImage(
-                Expression.get(ICON_PROPERTY)
-            ),
-            PropertyValue("icon-ignore-placement", true)
-        )
+        markerLayer.iconImage(Expression.get(ICON_PROPERTY))
+        markerLayer.iconIgnorePlacement(true)
         return markerLayer
     }
 
-    private fun updateGeojsonLayer(mapboxMap: MapboxMap, selectedMarker: Marker?) {
-        val latLngBoundsZoom = mapboxMap.getLatLngBoundsZoomFromCamera(mapboxMap.cameraPosition)
-        latLngBoundsZoom?.let { bounds ->
-            val isCameraPositionOutBounds = currentMapBounds?.let { currentBounds ->
-                checkCrossingBorder(
-                    bounds,
-                    currentBounds
-                )
-            } ?: false
-            if (bounds.zoom >= zoomGeojson && !isRadarOn && !isDisabledOn && (isCameraPositionOutBounds || geojsonString.isEmpty())) {
-                addGeojson(bounds, selectedMarker)
-            } else if (isRadarOn || isDisabledOn) {
-                removeGeojson()
-            }
+    private fun updateGeojsonLayer(boundsZoom: CoordinateBoundsZoom, selectedMarker: Marker?) {
+        val isCameraPositionOutBounds = geojsonMapBoundsZoom?.let { geojsonBounds ->
+            checkCrossingBorder(
+                boundsZoom,
+                geojsonBounds
+            )
+        } ?: false
+        if (boundsZoom.zoom >= zoomGeojson && !isRadarOn && !isDisabledOn && (isCameraPositionOutBounds || geojsonString.isEmpty())) {
+            addGeojson(boundsZoom, selectedMarker)
+        } else if (isRadarOn || isDisabledOn) {
+            removeGeojson()
         }
     }
 
     private fun checkCrossingBorder(
-        bounds: LatLngBoundsZoom,
-        currentMapBounds: LatLngBoundsZoom
+        boundsZoom: CoordinateBoundsZoom,
+        currentMapBoundsZoom: CoordinateBoundsZoom
     ): Boolean {
-        val minLat = currentMapBounds.latLngBounds?.southWest?.latitude!!
-        val maxLat = currentMapBounds.latLngBounds?.northWest?.latitude!!
-        val minLon = currentMapBounds.latLngBounds?.southWest?.longitude!!
-        val maxLon = currentMapBounds.latLngBounds?.southEast?.longitude!!
+        val minLat = currentMapBoundsZoom.bounds.southwest.latitude()
+        val maxLat = currentMapBoundsZoom.bounds.northeast.latitude()
+        val minLon = currentMapBoundsZoom.bounds.southwest.longitude()
+        val maxLon = currentMapBoundsZoom.bounds.northeast.longitude()
 
         val deltaLat = (maxLat - minLat) / 4
         val deltaLon = (maxLon - minLon) / 4
 
-        return bounds.latLngBounds?.center?.longitude!! !in (minLon + deltaLon)..(maxLon - deltaLon)
-                || bounds.latLngBounds?.center?.latitude!! !in (minLat + deltaLat)..(maxLat - deltaLat)
+        return boundsZoom.bounds.center().longitude() !in (minLon + deltaLon)..(maxLon - deltaLon)
+                || boundsZoom.bounds.center()
+            .latitude() !in (minLat + deltaLat)..(maxLat - deltaLat)
     }
 
-    private fun addGeojson(bounds: LatLngBoundsZoom, selectedMarker: Marker?) {
-        currentMapBounds = bounds
+    private fun addGeojson(boundsZoom: CoordinateBoundsZoom, selectedMarker: Marker?) {
+        geojsonMapBoundsZoom = boundsZoom
 
         geojsonString = geoJsonFactory.createGeoJsonString(
-            getScaledMapBounds(
+            mapBounds = getScaledMapBounds(
                 MapBounds(
-                    bounds.latLngBounds?.southWest?.latitude,
-                    bounds.latLngBounds?.northWest?.latitude,
-                    bounds.latLngBounds?.southWest?.longitude,
-                    bounds.latLngBounds?.southEast?.longitude
+                    boundsZoom.bounds.southwest.latitude(),
+                    boundsZoom.bounds.northeast.latitude(),
+                    boundsZoom.bounds.southwest.longitude(),
+                    boundsZoom.bounds.northeast.longitude()
                 )
             ),
-            selectedMarker?.data?.id ?: -1
+            selectedMarkerId = selectedMarker?.data?.id ?: -1
         )
 
-        if (geojsonString.isNotEmpty() && style?.isFullyLoaded == true) {
-            (style?.getSource(geojsonSourceId) as? GeoJsonSource)?.setGeoJson(geojsonString)
+        if (geojsonString.isNotEmpty() && style?.isStyleLoaded == true) {
+            (style?.getSource(geojsonSourceId) as? GeoJsonSource)?.featureCollection(
+                FeatureCollection.fromJson(geojsonString)
+            )
             updateGeojsonLayerProperties(selectedMarker)
         }
     }
 
     private fun updateGeojsonLayerProperties(selectedMarker: Marker?) {
         val defaultColorString = getColorStringFromCache(initColor) ?: ""
-        (style?.getLayer(geojsonLayerId) as? LineLayer)?.setProperties(
-            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-            PropertyFactory.lineJoin(Property.LINE_JOIN_MITER),
-            PropertyFactory.lineWidth(4.5f),
-            PropertyFactory.lineColor(
+        (style?.getLayer(geojsonLayerId) as? LineLayer)?.apply {
+            lineCap(LineCap.ROUND)
+            lineJoin(LineJoin.MITER)
+            lineWidth(4.5)
+            lineColor(
                 getExpressionForColoringLines(
                     defaultColorString,
                     selectedMarker
                 )
             )
-        )
+        }
     }
 
     private fun getExpressionForColoringLines(
@@ -408,18 +394,21 @@ class OsmMapWrapper(
             Expression.literal(defaultColor)
         } else {
             val item = items.next()
-            Expression.match(
-                Expression.get(item.property),
-                buildExpression(items, defaultColor),
-                Expression.stop(item.value, getColorStringFromCache(item.color) ?: "")
-            )
+            match {
+                get(item.property)
+                stop {
+                    literal(item.value)
+                    literal(getColorStringFromCache(item.color) ?: "")
+                }
+                addArgument(buildExpression(items, defaultColor))
+            }
         }
     }
 
     private fun removeGeojson() {
-        if (style?.isFullyLoaded == true) {
+        if (style?.isStyleLoaded == true) {
             geojsonString = ""
-            (style?.getSource(geojsonSourceId) as? GeoJsonSource)?.setGeoJson(
+            (style?.getSource(geojsonSourceId) as? GeoJsonSource)?.featureCollection(
                 FeatureCollection.fromFeatures(
                     mutableListOf()
                 )
@@ -436,7 +425,7 @@ class OsmMapWrapper(
         var deltaLat = maxLat - minLat
         var deltaLon = maxLon - minLon
 
-        deltaLat = abs(deltaLat - deltaLat * coefficientScaleMapBounds)
+        deltaLat = abs(deltaLat - deltaLat * coefficientScaleMapBounds * 2)
         deltaLon = abs(deltaLon - deltaLon * coefficientScaleMapBounds)
 
         minLat -= deltaLat
@@ -448,19 +437,9 @@ class OsmMapWrapper(
     }
 
     @SuppressLint("MissingPermission")
-    private fun enableLocationComponent(
-        style: Style,
-        mapboxMap: MapboxMap
-    ) {
-        if (locationComponent == null) {
-            val locationComponentActivationOptions = LocationComponentActivationOptions
-                .builder(context, style)
-                .build()
-            mapboxMap.locationComponent.activateLocationComponent(locationComponentActivationOptions)
-            mapboxMap.locationComponent.isLocationComponentEnabled = true
-            mapboxMap.locationComponent.cameraMode = CameraMode.NONE
-            mapboxMap.locationComponent.renderMode = RenderMode.NORMAL
-            locationComponent = mapboxMap.locationComponent
+    private fun enableLocationComponent() {
+        if (permissionProvider.isLocationPermissionGranted()) {
+            startLocationUpdates()
         }
     }
 
@@ -484,45 +463,6 @@ class OsmMapWrapper(
         }
     }
 
-    private fun mapClickListener(mapboxMap: MapboxMap) {
-        mapboxMap.addOnMapClickListener { point ->
-
-            val pixel = mapboxMap.projection.toScreenLocation(point)
-            val features = mapboxMap.queryRenderedFeatures(pixel, *layerIds.toTypedArray())
-
-            var feature: Feature? = null
-            val marker = if (!features.isNullOrEmpty()) {
-                feature = features.first()
-                markersMap[feature?.id()]
-            } else null
-            if (feature?.geometry()?.type()?.contentEquals(Location.LINE_STRING) == true) {
-                mapListeners.forEach {
-                    it.onPolyLineClicked(
-                        MapPoint(
-                            point.longitude,
-                            point.latitude
-                        )
-                    )
-                }
-                return@addOnMapClickListener false
-            }
-            if (marker == null) {
-                mapListeners.forEach {
-                    it.onMapTap(MapPoint(point.longitude, point.latitude))
-                }
-                false
-            } else {
-                point.let {
-                    mapListeners.forEach {
-                        it.onMarkerClicked(marker)
-                    }
-                }
-
-                true
-            }
-        }
-    }
-
     private fun moveCamera() {
         val lat = this.latitude
         val long = this.longitude
@@ -534,9 +474,16 @@ class OsmMapWrapper(
     }
 
     private fun startAnimatedMarker(marker: Marker) {
-        val runnable =
-            AnimatedImageRunnable(Handler(), drawablesForAnimated.lastIndex, mapboxMap!!, marker)
-        Handler().postDelayed(runnable, (marker as AnimationMarker).delay)
+        mapView?.getMapboxMap()?.let { mapboxMap ->
+            val runnable =
+                AnimatedImageRunnable(
+                    uiThreadHandler,
+                    drawablesForAnimated.lastIndex,
+                    mapboxMap,
+                    marker
+                )
+            uiThreadHandler.postDelayed(runnable, (marker as AnimationMarker).delay)
+        }
     }
 
     override fun start() {
@@ -557,42 +504,20 @@ class OsmMapWrapper(
         bottomRightX: Float,
         bottomRightY: Float
     ) {
-        mapView?.let { mapView ->
-            val centerOfVisibleMapView = PointF(
-                bottomRightX / 2,
-                bottomRightY / 2
-            )
-            val centerMapView = PointF(
-                mapView.width.toFloat() / 2,
-                mapView.height.toFloat() / 2
-            )
-            mapboxMap?.let { mapboxMap ->
-                val latLngOfCenterOfVisibleMapView =
-                    mapboxMap.projection.fromScreenLocation(centerOfVisibleMapView)
-                val latLngOfCenterMapView = mapboxMap.projection.fromScreenLocation(centerMapView)
-                offsetFromCenter =
-                    latLngOfCenterOfVisibleMapView.latitude - latLngOfCenterMapView.latitude
-            }
-            latLngSelectedObject?.let { latLngSelectedObject ->
-                moveCameraPositionWithZoom(latLngSelectedObject.latitude, latLngSelectedObject.longitude, zoom ?: DEFAULT_ZOOM.toFloat())
-            }
-        }
+        this.bottomRightY = (mapView?.height ?: 0) - bottomRightY
+        updateCamera()
     }
 
-    override fun clearCache(id: String) {
+    override fun clearCache(id: String) {}
 
-    }
-
-    override fun updateVersionCache(time: String) {
-
-    }
+    override fun updateVersionCache(time: String) {}
 
     @SuppressLint("MissingPermission")
     override fun destroy() {
         visibleMapRegionListeners.clear()
         mapListeners.clear()
         mapLocationListeners.clear()
-        mapboxMap?.locationComponent?.isLocationComponentEnabled = false
+        mapView?.location?.enabled = false
         mapView?.removeOnLayoutChangeListener(layoutChangeListener)
         layoutChangeListener = null
         layoutChangeListeners.clear()
@@ -601,33 +526,21 @@ class OsmMapWrapper(
                 locationEngineCallback
             )
         }
-        markerManager?.onDestroy()
-        markerManager = null
-        mapView?.onPause()
         mapView?.onStop()
         mapView?.onDestroy()
-        mapboxMap = null
-        locationComponent = null
         style = null
         locationEngine = null
         locationEngineCallback = null
     }
 
     override fun create(savedInstanceState: Bundle?) {
-        mapView?.onCreate(savedInstanceState)
     }
 
-    override fun resume() {
-        mapView?.onResume()
-    }
+    override fun resume() {}
 
-    override fun pause() {
-        mapView?.onPause()
-    }
+    override fun pause() {}
 
-    override fun saveInstanceState(outState: Bundle) {
-        mapView?.onSaveInstanceState(outState)
-    }
+    override fun saveInstanceState(outState: Bundle) {}
 
     override fun onLowMemory() {
         mapView?.onLowMemory()
@@ -698,8 +611,10 @@ class OsmMapWrapper(
 
     }
 
+    @SuppressLint("MissingPermission")
     override fun enableLocation(enable: Boolean?) {
-
+        mapView?.location?.enabled =
+            permissionProvider.isLocationPermissionGranted()
     }
 
     override fun onMarkersUpdated(
@@ -707,11 +622,17 @@ class OsmMapWrapper(
         newMarkers: MutableMap<String, Marker>,
         zoom: Float
     ) {
-        insert(newMarkers.values.toList())
+        uiThreadHandler.post {
+            insert(newMarkers.values.toList())
+        }
     }
 
     override fun isAnimatedMarkersEnabled(): Boolean {
         return isRadarOn
+    }
+
+    override fun drawPolygon(coordinates: List<MapCoordinates>) {
+
     }
 
     private fun insert(markers: List<Marker>) {
@@ -727,7 +648,10 @@ class OsmMapWrapper(
             if (checkVisibilitySelectedMarker(marker)) {
                 markersMap[marker.id]?.state = marker.state
                 geojsonString = ""
-                mapboxMap?.let { updateGeojsonLayer(it, marker) }
+                mapView?.getMapboxMap()?.let { mapboxMap ->
+                    val bounds = getCoordinateBoundsZoomWithoutContentPaddings(mapboxMap)
+                    updateGeojsonLayer(bounds, marker)
+                }
             }
         }
 
@@ -749,9 +673,10 @@ class OsmMapWrapper(
                 } else {
                     val bitmapId = addBitmap(style, marker)
                     if (marker.type != MarkerType.NO_MARKER) {
-                        if (!(markersMap.contains(marker.id) && mapboxMap?.cameraPosition?.zoom == zoomGeojson.toDouble()
-                                    && marker.data?.type == MapItemType.PARKING.toString()
-                                    )
+                        val currentZoom = mapView?.getMapboxMap()?.cameraState?.zoom
+                        if (!(markersMap.contains(marker.id)
+                                    && currentZoom == zoomGeojson.toDouble()
+                                    && marker.data?.type == MapItemType.PARKING.toString())
                         ) {
                             markerFeatures.add(createSymbolFeature(marker, bitmapId))
                         }
@@ -803,15 +728,16 @@ class OsmMapWrapper(
     ) {
         val markerSource = style.getSource(markerSourceId)
         if (markerSource != null && markerSource is GeoJsonSource) {
-            markerSource.setGeoJson(FeatureCollection.fromFeatures(markerFeatures))
+            markerSource.featureCollection(FeatureCollection.fromFeatures(markerFeatures))
         }
         val lineSource = style.getSource(lineSourceId)
         if (lineSource != null && lineSource is GeoJsonSource) {
-            lineSource.setGeoJson(FeatureCollection.fromFeatures(lineFeatures))
+            val lineFeatureCollection = FeatureCollection.fromFeatures(lineFeatures)
+            lineSource.featureCollection(lineFeatureCollection)
         }
         val polygonSource = style.getSource(polygonSourceId)
         if (polygonSource != null && polygonSource is GeoJsonSource) {
-            polygonSource.setGeoJson(FeatureCollection.fromFeatures(polygonFeatures))
+            polygonSource.featureCollection(FeatureCollection.fromFeatures(polygonFeatures))
         }
     }
 
@@ -904,97 +830,74 @@ class OsmMapWrapper(
         return feature
     }
 
+    private fun updateCamera() {
+        val latitude = this.latitude
+        val longitude = this.longitude
+        val zoom = this.zoom?.toDouble() ?: DEFAULT_ZOOM
+        val builder = CameraOptions.Builder()
+        if (latitude != null && longitude != null) {
+            val latLng = Point.fromLngLat(longitude, latitude)
+            builder.center(latLng)
+        }
+        val padding = EdgeInsets(0.0, 0.0, this.bottomRightY.toDouble(), 0.0)
+        val cameraOptions = builder
+            .zoom(zoom)
+            .padding(padding)
+            .build()
+        mapView?.getMapboxMap()?.flyTo(
+            cameraOptions,
+            MapAnimationOptions.mapAnimationOptions { duration(DURATION_200MS) })
+    }
+
     override fun moveCameraPosition(latitude: Double, longitude: Double) {
-        moveCameraPositionWithZoom(latitude, longitude, DEFAULT_ZOOM.toFloat())
+        uiThreadHandler.post {
+            moveCameraPositionWithZoom(latitude, longitude, DEFAULT_ZOOM.toFloat())
+        }
     }
 
     override fun moveCameraPositionWithZoom(latitude: Double, longitude: Double, zoom: Float) {
-        val latLng = LatLng(latitude - offsetFromCenter, longitude)
-        latLngSelectedObject = LatLng(latitude, longitude)
         this.latitude = latitude
         this.longitude = longitude
         this.zoom = zoom
-        val cameraPosition = CameraPosition.Builder()
-            .target(latLng)
-            .zoom(zoom.toDouble())
-            .bearing(0.0)
-            .tilt(0.0)
-            .build()
-
-        mapboxMap?.animateCamera(
-            CameraUpdateFactory
-                .newCameraPosition(cameraPosition), 200
-        )
+        updateCamera()
     }
 
     override fun moveCameraPositionWithBounds(mapBounds: MapBounds) {
-        val topRight = LatLng(mapBounds.maxLat, mapBounds.maxLon)
-        val bottomLeft = LatLng(mapBounds.minLat, mapBounds.minLon)
-        val latLngBounds = LatLngBounds.Builder()
-            .include(topRight) // Northeast
-            .include(bottomLeft) // Southwest
-            .build()
-
-        mapboxMap?.animateCamera(
-            CameraUpdateFactory
-                .newLatLngBounds(latLngBounds, 0), 200
-        )
+        val topRight = Point.fromLngLat(mapBounds.maxLon, mapBounds.maxLat)
+        val bottomLeft = Point.fromLngLat(mapBounds.minLon, mapBounds.minLat)
+        val latLngBounds = CoordinateBounds(bottomLeft, topRight)
+        mapView?.getMapboxMap()?.let {
+            val cameraOptions = it.cameraForCoordinateBounds(latLngBounds)
+            it.setCamera(
+                cameraOptions
+            )
+        }
     }
 
     override fun moveCameraZoomAndPosition(latitude: Double, longitude: Double, zoom: Float) {
-        val latLng = LatLng(latitude - offsetFromCenter, longitude)
-        latLngSelectedObject = LatLng(latitude, longitude)
+        this.latitude = latitude
+        this.longitude = longitude
         this.zoom = zoom
-        val cameraPosition = CameraPosition.Builder()
-            .target(latLng)
-            .zoom(zoom.toDouble())
-            .bearing(0.0)
-            .tilt(0.0)
-            .build()
-
-        mapboxMap?.animateCamera(
-            CameraUpdateFactory
-                .newCameraPosition(cameraPosition), 400
-        )
+        updateCamera()
     }
 
     override fun moveToUserLocation(defaultCoordinates: MapCoordinates?) {
         this.defaultCoordinates = defaultCoordinates
         defaultCoordinates?.let {
-            val latLng = LatLng(defaultCoordinates.latitude - offsetFromCenter, defaultCoordinates.longitude)
-            latLngSelectedObject = LatLng(defaultCoordinates.latitude, defaultCoordinates.longitude)
+            this.latitude = defaultCoordinates.latitude
+            this.longitude = defaultCoordinates.longitude
             this.zoom = DEFAULT_ZOOM.toFloat()
-            val cameraPosition = CameraPosition.Builder()
-                .target(latLng)
-                .zoom(DEFAULT_ZOOM)
-                .bearing(0.0)
-                .tilt(0.0)
-                .build()
-
-            mapboxMap?.animateCamera(
-                CameraUpdateFactory
-                    .newCameraPosition(cameraPosition), 200
-            )
+            updateCamera()
         }
     }
 
     override fun moveToUserLocation(zoom: Float, defaultCoordinates: MapCoordinates?) {
-        val locationLatLang = getLocationLatLng(defaultCoordinates)
+        val locationLatLang = getLocationPoint(defaultCoordinates)
         locationLatLang?.let {
-            val latLng = LatLng(locationLatLang.latitude - offsetFromCenter, locationLatLang.longitude)
-            latLngSelectedObject = LatLng(locationLatLang.latitude, locationLatLang.longitude)
+            this.latitude = locationLatLang.latitude()
+            this.longitude = locationLatLang.longitude()
             this.zoom = zoom
-            val newCameraPosition = CameraPosition.Builder()
-                .target(latLng)
-                .zoom(zoom.toDouble())
-                .bearing(0.0)
-                .tilt(0.0)
-                .build()
-
-            mapboxMap?.animateCamera(
-                CameraUpdateFactory
-                    .newCameraPosition(newCameraPosition), 200
-            )
+            updateCamera()
         } ?: kotlin.run {
             mapListeners.forEach {
                 it.onLocationDisabled()
@@ -1002,18 +905,16 @@ class OsmMapWrapper(
         }
     }
 
-    private fun getLocationLatLng(mapCoordinates: MapCoordinates?): LatLng? {
-        var locationLatLng: LatLng? = null
-        var lastKnownLocation: android.location.Location? = null
-        if (locationComponent?.isLocationComponentActivated == true) {
-            lastKnownLocation = locationComponent?.lastKnownLocation
-        }
+    private fun getLocationPoint(mapCoordinates: MapCoordinates?): Point? {
+        var locationLatLng: Point? = null
         if (mapCoordinates != null) {
-            locationLatLng = LatLng(mapCoordinates.latitude, mapCoordinates.longitude)
-        } else if (lastKnownLocation != null) {
-            locationLatLng = LatLng(lastKnownLocation.latitude, lastKnownLocation.longitude)
+            locationLatLng = Point.fromLngLat(mapCoordinates.longitude, mapCoordinates.latitude)
+        } else {
+            lastLocation?.let { location ->
+                locationLatLng =
+                    Point.fromLngLat(location.longitude, location.latitude)
+            }
         }
-
         return locationLatLng
     }
 
@@ -1022,89 +923,66 @@ class OsmMapWrapper(
         defaultCoordinates: MapCoordinates,
         mapCallback: MapCallback
     ) {
-        val location = locationComponent?.lastKnownLocation
-        var zoomCameraPosition: CameraPosition? = null
-        if (defaultCoordinates != null) {
-            zoomCameraPosition = CameraPosition.Builder()
-                .target(LatLng(defaultCoordinates.latitude, defaultCoordinates.longitude))
-                .zoom(zoom.toDouble())
-                .bearing(0.0)
-                .tilt(0.0)
-                .build()
-        } else if (location != null) {
-            zoomCameraPosition = CameraPosition.Builder()
-                .target(LatLng(location.latitude, location.longitude))
-                .zoom(zoom.toDouble())
-                .bearing(0.0)
-                .tilt(0.0)
-                .build()
-        }
-
-        zoomCameraPosition?.let {
-            mapboxMap?.animateCamera(
-                CameraUpdateFactory
-                    .newCameraPosition(zoomCameraPosition), 200
-            )
+        var isCameraUpdateAvailable = false
+        this.zoom = zoom
+        updateCamera()
+        isCameraUpdateAvailable = true
+        this.latitude = defaultCoordinates.latitude
+        this.longitude = defaultCoordinates.longitude
+        if (isCameraUpdateAvailable) {
+            updateCamera()
         }
     }
 
     override fun deselect(markerToDeselect: Marker) {
-        geojsonString = ""
-        mapboxMap?.let { updateGeojsonLayer(it, null) }
-        updateMapObject(markersMap.values.toMutableList())
+        uiThreadHandler.post {
+            this.latitude = null
+            this.longitude = null
+            geojsonString = ""
+            mapView?.getMapboxMap()?.let { mapboxMap ->
+                val bounds = getCoordinateBoundsZoomWithoutContentPaddings(mapboxMap)
+                updateGeojsonLayer(bounds, null)
+            }
+            updateMapObject(markersMap.values.toMutableList())
+        }
     }
 
     override fun selectMarker(markerToSelect: Marker) {
-        geojsonString = ""
-        mapboxMap?.let { updateGeojsonLayer(it, markerToSelect) }
-        updateMapObject(markersMap.values.toMutableList())
+        uiThreadHandler.post {
+            geojsonString = ""
+            mapView?.getMapboxMap()?.let { mapboxMap ->
+                val bounds = getCoordinateBoundsZoomWithoutContentPaddings(mapboxMap)
+                updateGeojsonLayer(bounds, markerToSelect)
+            }
+            updateMapObject(markersMap.values.toMutableList())
+        }
     }
 
     override fun zoomIn() {
-        val cameraPosition = mapboxMap?.cameraPosition
-        cameraPosition?.let {
-            val latLng = cameraPosition.target
-            var zoom = cameraPosition.zoom
-            val bearing = cameraPosition.bearing
-            val tilt = cameraPosition.tilt
+        val cameraState = mapView?.getMapboxMap()?.cameraState
+        cameraState?.let { state ->
+            var zoom = state.zoom
             if (zoom < MAX_ZOOM) {
                 zoom += 1
             }
-            val newCameraPosition = CameraPosition.Builder()
-                .target(latLng)
-                .zoom(zoom.roundToInt().toDouble())
-                .bearing(bearing)
-                .tilt(tilt)
-                .build()
-
-            mapboxMap?.animateCamera(
-                CameraUpdateFactory
-                    .newCameraPosition(newCameraPosition), 200
-            )
+            this.latitude = state.center.latitude()
+            this.longitude = state.center.longitude()
+            this.zoom = zoom.roundToInt().toFloat()
+            updateCamera()
         }
     }
 
     override fun zoomOut() {
-        val cameraPosition = mapboxMap?.cameraPosition
-        cameraPosition?.let {
-            val latLng = cameraPosition.target
-            var zoom = cameraPosition.zoom
-            val bearing = cameraPosition.bearing
-            val tilt = cameraPosition.tilt
+        val cameraState = mapView?.getMapboxMap()?.cameraState
+        cameraState?.let { position ->
+            var zoom = position.zoom
             if (zoom > MIN_ZOOM) {
                 zoom -= 1
             }
-            val newCameraPosition = CameraPosition.Builder()
-                .target(latLng)
-                .zoom(zoom.roundToInt().toDouble())
-                .bearing(bearing)
-                .tilt(tilt)
-                .build()
-
-            mapboxMap?.animateCamera(
-                CameraUpdateFactory
-                    .newCameraPosition(newCameraPosition), 200
-            )
+            this.latitude = position.center.latitude()
+            this.longitude = position.center.longitude()
+            this.zoom = zoom.roundToInt().toFloat()
+            updateCamera()
         }
     }
 
@@ -1124,7 +1002,7 @@ class OsmMapWrapper(
         this.isRadarOn = isRadarOn
         this.isColoredMarkersEnabled = isColoredMarkersEnabled
 
-        mapboxMap?.getStyle {
+        mapView?.getMapboxMap()?.getStyle {
             insert(markers.toList())
         }
     }
@@ -1138,7 +1016,10 @@ class OsmMapWrapper(
         }
         this.isDisabledOn = isDisabledOn
         updateMapObject(markersMap.values.toMutableList())
-        mapboxMap?.let { updateGeojsonLayer(it, selectedMarker) }
+        mapView?.getMapboxMap()?.let { mapboxMap ->
+            val bounds = getCoordinateBoundsZoomWithoutContentPaddings(mapboxMap)
+            updateGeojsonLayer(bounds, selectedMarker)
+        }
     }
 
     override fun setAnimationMarkerListener(animationMarkerListener: AnimationMarkerListener) {
@@ -1163,13 +1044,13 @@ class OsmMapWrapper(
         override fun run() {
             val idMarker = marker.id.replace(AnimationMarkerType.ANIMATED.toString(), "")
             mapboxMap.getStyle { style ->
-                style.getLayer(idAnimLayer(idMarker))?.let {
+                style.getLayer(idAnimLayer(idMarker))?.also {
                     if (drawableIndex > lastIndex) {
                         markersAnimatedSet.remove(idMarker)
-                        style.removeLayer(idAnimLayer(idMarker))
-                        style.removeSource(idAnimatedImageSource(idMarker))
-                    } else {
-                        it.setProperties(PropertyFactory.iconImage(drawableIndex++.toString()))
+                        style.removeStyleLayer(idAnimLayer(idMarker))
+                        style.removeStyleSource(idAnimatedImageSource(idMarker))
+                    } else if (it is SymbolLayer) {
+                        it.iconImage(drawableIndex++.toString())
                         handler.postDelayed(this, 600)
                     }
                 } ?: run {
@@ -1178,20 +1059,15 @@ class OsmMapWrapper(
                         null,
                         marker.id
                     )
+                    val source = geoJsonSource(idAnimatedImageSource(idMarker))
+                    source.featureCollection(FeatureCollection.fromFeature(feature))
+                    style.addSource(source)
 
-                    style.addSource(
-                        GeoJsonSource(
-                            idAnimatedImageSource(idMarker),
-                            FeatureCollection.fromFeature(feature)
-                        )
-                    )
-
-                    style.addLayer(
-                        SymbolLayer(idAnimLayer(idMarker), idAnimatedImageSource(idMarker))
-                            .withProperties(
-                                PropertyFactory.iconImage(drawableIndex++.toString())
-                            )
-                    )
+                    val layer =
+                        symbolLayer(idAnimLayer(idMarker), idAnimatedImageSource(idMarker)) {
+                            iconImage(drawableIndex++.toString())
+                        }
+                    style.addLayer(layer)
                     handler.postDelayed(this, 600)
                 }
             }
@@ -1202,44 +1078,62 @@ class OsmMapWrapper(
         return markersMap[selectedMarker.id] != null
     }
 
-    inner class OsmOnCameraMoveListener(val mapboxMap: MapboxMap) : MapboxMap.OnCameraMoveListener {
+    private fun getCoordinateBoundsZoomWithoutContentPaddings(mapboxMap: MapboxMap): CoordinateBoundsZoom {
+        val cameraState = mapboxMap.cameraState
+        val bounds = mapboxMap.coordinateBoundsForCamera(cameraState.toCameraOptions())
+        val zoom = mapboxMap.cameraState.zoom
+        return CoordinateBoundsZoom(
+            bounds,
+            zoom
+        )
+    }
 
-        override fun onCameraMove() {
-            var selectedMarker: Marker? = null
-            markersMap.forEach {
-                if (it.value.state == MarkerState.SELECTED) {
-                    selectedMarker = it.value
-                }
+    private fun updateVisibleMapRegion(mapboxMap: MapboxMap) {
+        var selectedMarker: Marker? = null
+        markersMap.forEach {
+            if (it.value.state == MarkerState.SELECTED) {
+                selectedMarker = it.value
             }
-            updateGeojsonLayer(mapboxMap, selectedMarker)
-            val latLngBoundsZoom =
-                mapboxMap.getLatLngBoundsZoomFromCamera(mapboxMap.cameraPosition)
-            latLngBoundsZoom?.let { bounds ->
+        }
+        val boundsZoom = getCoordinateBoundsZoomWithoutContentPaddings(mapboxMap)
+        updateGeojsonLayer(boundsZoom, selectedMarker)
 
-                visibleMapRegionListeners.forEach { listener ->
-                    listener.onRegionChange(
-                        VisibleMapRegion(
-                            MapPoint(
-                                bounds.latLngBounds.northWest.longitude,
-                                bounds.latLngBounds.northWest.latitude
-                            ),
-                            MapPoint(
-                                bounds.latLngBounds.northEast.longitude,
-                                bounds.latLngBounds.northEast.latitude
-                            ),
-                            MapPoint(
-                                bounds.latLngBounds.southWest.longitude,
-                                bounds.latLngBounds.southWest.latitude
-                            ),
-                            MapPoint(
-                                bounds.latLngBounds.southEast.longitude,
-                                bounds.latLngBounds.southEast.latitude
-                            ),
-                            bounds.zoom.toInt().toFloat()
-                        )
-                    )
-                }
-            }
+        visibleMapRegionListeners.forEach { listener ->
+            listener.onRegionChange(
+                VisibleMapRegion(
+                    MapPoint(
+                        boundsZoom.bounds.west(),
+                        boundsZoom.bounds.north()
+                    ),
+                    MapPoint(
+                        boundsZoom.bounds.east(),
+                        boundsZoom.bounds.north()
+                    ),
+                    MapPoint(
+                        boundsZoom.bounds.west(),
+                        boundsZoom.bounds.south()
+                    ),
+                    MapPoint(
+                        boundsZoom.bounds.east(),
+                        boundsZoom.bounds.south()
+                    ),
+                    boundsZoom.zoom.toInt().toFloat()
+                )
+            )
+        }
+    }
+
+    inner class OsmOnCameraMoveListener(val mapboxMap: MapboxMap) :
+        CameraAnimatorChangeListener<Point> {
+        override fun onChanged(updatedValue: Point) {
+            updateVisibleMapRegion(mapboxMap)
+        }
+    }
+
+    inner class OsmOnCameraScaleListener(val mapboxMap: MapboxMap) :
+        CameraAnimatorChangeListener<Double> {
+        override fun onChanged(updatedValue: Double) {
+            updateVisibleMapRegion(mapboxMap)
         }
     }
 
@@ -1271,7 +1165,38 @@ class OsmMapWrapper(
             )
             return bitmap
         }
+    }
 
-        //endregion
+    inner class OsmOnMapClickListener(private val mapboxMap: MapboxMap) : OnMapClickListener {
+        override fun onMapClick(point: Point): Boolean {
+            val screenCoordinate = mapboxMap.pixelForCoordinate(point)
+            mapboxMap.queryRenderedFeatures(
+                RenderedQueryGeometry(screenCoordinate),
+                RenderedQueryOptions(layerIds, null)
+            ) { expected ->
+                val features = expected.value
+                var feature: Feature? = null
+                val marker = if (!features.isNullOrEmpty()) {
+                    feature = features.firstOrNull()?.feature
+                    markersMap[feature?.id()]
+                } else {
+                    null
+                }
+                val isLine =
+                    feature?.geometry()?.type()?.contentEquals(Location.LINE_STRING) ?: false
+                if (marker == null || isLine) {
+                    mapListeners.forEach {
+                        it.onMapTap(MapPoint(point.longitude(), point.latitude()))
+                    }
+                } else {
+                    point.let {
+                        mapListeners.forEach {
+                            it.onMarkerClicked(marker)
+                        }
+                    }
+                }
+            }
+            return false
+        }
     }
 }

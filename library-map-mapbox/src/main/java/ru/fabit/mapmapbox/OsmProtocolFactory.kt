@@ -19,7 +19,8 @@ class OsmProtocolFactory {
             zoomGeojson: Int,
             drawablesForAnimated: List<Bitmap>,
             mapStyleProvider: OsmMapStyleProviderImpl,
-            lineColorProvider: LineColorProvider
+            lineColorProvider: LineColorProvider,
+            permissionProvider: PermissionProvider
         ): MapProtocol {
             return OsmMapWrapper(
                 context,
@@ -31,7 +32,8 @@ class OsmProtocolFactory {
                 zoomGeojson,
                 drawablesForAnimated,
                 mapStyleProvider,
-                lineColorProvider
+                lineColorProvider,
+                permissionProvider
             )
         }
     }
