@@ -35,6 +35,6 @@ android {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
-    implementation 'com.mapbox.mapboxsdk:mapbox-android-sdk:10.6.0'
+    implementation 'com.mapbox.maps:android:10.6.0'
     implementation 'com.github.FabitMobile:library-map:3.0.1-beta.1'
 }
