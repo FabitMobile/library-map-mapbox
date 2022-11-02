@@ -9,6 +9,7 @@ import android.os.Looper.getMainLooper
 import android.view.View
 import com.mapbox.android.core.location.*
 import com.mapbox.geojson.*
+import com.mapbox.geojson.Point
 import com.mapbox.maps.*
 import com.mapbox.maps.extension.localization.localizeLabels
 import com.mapbox.maps.extension.style.expressions.dsl.generated.match
@@ -32,7 +33,7 @@ import com.mapbox.maps.plugin.gestures.OnMapClickListener
 import com.mapbox.maps.plugin.gestures.addOnMapClickListener
 import com.mapbox.maps.plugin.gestures.gestures
 import com.mapbox.maps.plugin.locationcomponent.location
-import ru.fabit.map.dependencies.factory.GeoJsonFactory
+import com.mapbox.maps.plugin.scalebar.scalebar
 import ru.fabit.map.dependencies.factory.GeometryColorFactory
 import ru.fabit.map.dependencies.factory.MarkerBitmapFactory
 import ru.fabit.map.internal.domain.entity.*
@@ -46,7 +47,7 @@ import kotlin.math.roundToInt
 class OsmMapWrapper(
     private val context: Context,
     private val key: String,
-    private val geoJsonFactory: GeoJsonFactory,
+    private val osmGeojsonProvider: OsmGeojsonProvider,
     private val markerBitmapFactory: MarkerBitmapFactory,
     private val geometryColorFactory: GeometryColorFactory,
     private val initColor: Int,
@@ -249,6 +250,7 @@ class OsmMapWrapper(
                 enableLocationComponent()
                 mapView?.gestures?.rotateEnabled = false
                 mapView?.gestures?.pitchEnabled = false
+                mapView?.scalebar?.enabled = false
                 loadedStyle.localizeLabels(Locale.getDefault())
                 setBounds(
                     CameraBoundsOptions.Builder()
@@ -343,7 +345,7 @@ class OsmMapWrapper(
     private fun addGeojson(boundsZoom: CoordinateBoundsZoom, selectedMarker: Marker?) {
         geojsonMapBoundsZoom = boundsZoom
 
-        geojsonString = geoJsonFactory.createGeoJsonString(
+        geojsonString = osmGeojsonProvider.createGeoJsonString(
             mapBounds = getScaledMapBounds(
                 MapBounds(
                     boundsZoom.bounds.southwest.latitude(),
