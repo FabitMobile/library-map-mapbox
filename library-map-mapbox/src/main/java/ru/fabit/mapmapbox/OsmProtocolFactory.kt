@@ -12,7 +12,7 @@ class OsmProtocolFactory {
         fun create(
             context: Context,
             key: String,
-            geoJsonFactory: GeoJsonFactory,
+            osmGeojsonProvider: OsmGeojsonProvider,
             markerBitmapFactory: MarkerBitmapFactory,
             geometryColorFactory: GeometryColorFactory,
             initColor: Int,
@@ -25,7 +25,7 @@ class OsmProtocolFactory {
             return OsmMapWrapper(
                 context,
                 key,
-                geoJsonFactory,
+                osmGeojsonProvider,
                 markerBitmapFactory,
                 geometryColorFactory,
                 initColor,
